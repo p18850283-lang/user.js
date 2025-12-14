@@ -1,0 +1,176 @@
+// ==UserScript==
+// @name         Fix for BatoTo's Non-Loading Pages - Fallback to other servers
+// @namespace    http://tampermonkey.net/
+// @version      2.0.2
+// @description  Automatically retries broken BatoTo images using a multi-stage fallback: letter swap, and a targeted brute-force search.
+// @author       ItachiUchiha
+// @homepageURL  https://gist.github.com/ItachiUchiha-IU/8fb58bc48b120e88ecd1462aed06f3f8
+// @supportURL   https://gist.github.com/ItachiUchiha-IU/8fb58bc48b120e88ecd1462aed06f3f8/comments
+// @updateURL    https://gist.githubusercontent.com/ItachiUchiha-IU/8fb58bc48b120e88ecd1462aed06f3f8/raw/Fix%2520for%2520BatoTo's%2520Non-Loading%2520Pages%2520-%2520Fallback%2520to%2520other%2520servers.user.js
+// @downloadURL  https://gist.githubusercontent.com/ItachiUchiha-IU/8fb58bc48b120e88ecd1462aed06f3f8/raw/Fix%2520for%2520BatoTo's%2520Non-Loading%2520Pages%2520-%2520Fallback%2520to%2520other%2520servers.user.js
+// @include      *://*bato*.*/*
+// @include      *://*toto*.*/*
+// @include      *://*ba.to/*
+// @include      *://*to.to/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=bato.to
+// @license      MIT
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- CONFIGURATION ---
+
+    // Stage 1: Attempt to swap the server letter first (e.g., k07 -> n07)
+    const serversLetters = ["n"];
+
+    // Stage 2: Brute-force attempt if all else fails.
+    const bruteForceLetters = 'abcdefghijklmnopqrstuvwxyz'.split('');
+    // An array of numbers to try for each letter in the brute-force stage. Order matters.
+    const bruteForceNumbers = ['01', '03', '00'];
+
+
+    function retryImage(img) {
+        // Initialize state on the first error for this image
+        if (!img.dataset.retryState) {
+            img.dataset.retryState = JSON.stringify({
+                stage: 'letterSwap', // Start with the letter swap stage
+                originalSrc: img.src,
+                letterIndex: 0,
+                bruteForceLetterIndex: 0,
+                bruteForceNumberIndex: 0,
+            });
+        }
+
+        const state = JSON.parse(img.dataset.retryState);
+
+        // If all attempts have failed, do nothing more.
+        if (state.stage === 'failed') {
+            return;
+        }
+
+        const originalUrlParts = state.originalSrc.match(/^https:\/\/([a-zA-Z])(\d{2})\./);
+        let newSrc = null;
+
+        // --- STATE MACHINE FOR RETRY LOGIC ---
+        // This loop determines the next URL to try based on the current fallback stage.
+        while (!newSrc) {
+            if (state.stage === 'letterSwap') {
+                if (!originalUrlParts || state.letterIndex >= serversLetters.length) {
+                    // Move to the next stage if we can't parse the URL or run out of letters
+                    state.stage = 'bruteForce';
+                    continue; // Re-run the loop to start the bruteForce stage immediately
+                }
+
+                const originalLetter = originalUrlParts[1];
+                const originalNumber = originalUrlParts[2];
+                const nextLetter = serversLetters[state.letterIndex];
+                state.letterIndex++; // Always advance index for the next attempt
+
+                if (nextLetter !== originalLetter) {
+                    const nextServer = nextLetter + originalNumber;
+                    newSrc = state.originalSrc.replace(/^https:\/\/([a-zA-Z]\d{2})\./, `https://${nextServer}.`);
+                }
+                // If letters match, this pass generates no newSrc and the loop continues.
+
+            } else if (state.stage === 'bruteForce') {
+                // Check if we have tried all the letters. This is the final exit condition.
+                if (state.bruteForceLetterIndex >= bruteForceLetters.length) {
+                    // All stages exhausted, mark as failed
+                    state.stage = 'failed';
+                    console.error("[Bato Fix] All server attempts failed for:", state.originalSrc);
+                    break; // Exit the while loop
+                }
+
+                // Get the current letter and number based on the saved state.
+                const letter = bruteForceLetters[state.bruteForceLetterIndex];
+                const number = bruteForceNumbers[state.bruteForceNumberIndex];
+
+                // Construct the next server name (e.g., 'a' + '01' -> 'a01')
+                const nextServer = letter + number;
+                newSrc = state.originalSrc.replace(/^https:\/\/([a-zA-Z]\d{2})\./, `https://${nextServer}.`);
+
+                // Advance the indices for the NEXT attempt.
+                // We always increment the number index first.
+                state.bruteForceNumberIndex++;
+
+                // If we have tried all numbers for the current letter...
+                if (state.bruteForceNumberIndex >= bruteForceNumbers.length) {
+                    // ...reset the number index back to 0...
+                    state.bruteForceNumberIndex = 0;
+                    // ...and move to the next letter.
+                    state.bruteForceLetterIndex++;
+                }
+
+            } else {
+                // Should not happen, but as a safeguard
+                break;
+            }
+        }
+
+        // If we found a new source URL to try, and it's different from the current one, apply it.
+        // The check 'newSrc !== img.src' is critical to prevent an infinite loop.
+        if (newSrc && newSrc !== img.src) {
+            console.log(`[Bato Fix] Stage: ${state.stage}, Trying: ${newSrc}`);
+            img.src = newSrc;
+            // Save the updated state for the next potential error
+            img.dataset.retryState = JSON.stringify(state);
+        } else if (state.stage === 'failed') {
+            // Persist the 'failed' state so we don't try again.
+            img.dataset.retryState = JSON.stringify(state);
+        }
+    }
+
+    function handleSuccess(img) {
+        // Only act if this image was previously broken and had a retry state.
+        if (img.dataset.retryState) {
+            const state = JSON.parse(img.dataset.retryState);
+            // Check if the successful src is different from the original broken one.
+            if (img.src !== state.originalSrc) {
+                console.log("[Bato Fix] SUCCESS! Found working address:", img.src);
+            }
+            // Once an image is loaded successfully, we can clear its retry state.
+            delete img.dataset.retryState;
+        }
+    }
+
+
+    // --- ATTACH EVENT LISTENERS ---
+    // Use a MutationObserver to catch images added to the page later (e.g., by infinite scroll)
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            mutation.addedNodes.forEach(node => {
+                if (node.tagName === 'IMG') {
+                    attachListenersToImage(node);
+                } else if (node.querySelectorAll) {
+                    node.querySelectorAll('img').forEach(attachListenersToImage);
+                }
+            });
+        });
+    });
+
+    function attachListenersToImage(img) {
+        // Only attach listener if it hasn't been attached before to avoid duplicates
+        if (img.dataset.batoFixAttached) return;
+        img.dataset.batoFixAttached = true;
+
+        img.addEventListener("error", (event) => {
+            retryImage(event.target);
+        });
+        img.addEventListener("load", () => handleSuccess(img)); // Listen for success
+
+        // Handle already-broken images that loaded before the script ran
+        if (img.complete && img.naturalWidth === 0) {
+            console.log("[Bato Fix] Initial broken image detected:", img.src);
+            retryImage(img);
+        }
+    }
+
+    // Attach to all initial images on the page
+    document.querySelectorAll("img").forEach(attachListenersToImage);
+
+    // Start observing for any new images added to the page
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
